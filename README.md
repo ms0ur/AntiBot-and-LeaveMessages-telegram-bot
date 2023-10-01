@@ -1,5 +1,7 @@
 # AntiBot-and-LeaveMessages-telegram-bot
 
+[![built with Codeium](https://codeium.com/badges/main)](https://codeium.com)
+
 this bot will delete all added bot from non-admin users of chat. Additionaly removes a "X joined to chat"(or something like that) or "X leave chat" messages
 
 ##WARNING!
