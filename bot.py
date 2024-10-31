@@ -26,6 +26,17 @@ def has_rtl(text):
     """
     return bool(rtl_pattern.search(text))
 ####################################################################################################################################################################################################################################################################################################BY ms0ur
+async def delete_bot_messages(chat_id, bot_user_id):
+    """
+    Deletes recent messages from the specified bot in the chat.
+    """
+    async for message in bot.get_chat_history(chat_id, limit=100):  # Укажите лимит, например 100
+        if message.from_user and message.from_user.id == bot_user_id:
+            try:
+                await bot.delete_message(chat_id, message.message_id)
+            except Exception as e:
+                print(f"Не удалось удалить сообщение: {e}")
+
 async def delete_message_delayed(chat_id, message_id, delay=0):
     """
     Deletes a message with a delay.
@@ -46,8 +57,10 @@ async def on_new_chat_members(message: types.Message):
             if chat_member.status not in ['administrator', 'creator']:
                 await bot.kick_chat_member(message.chat.id, member.id)
                 reply_message = await message.reply(f"Был забанен бот || {member.first_name} || за добавление пользователем, неимеющего админских прав.") ##BY MS0UR
+                await delete_bot_messages(message.chat.id, member.id)
                 asyncio.create_task(delete_message_delayed(message.chat.id, reply_message.message_id, delay=5))
                 asyncio.create_task(delete_message_delayed(message.chat.id, message.message_id, delay=5))
+                
             else:
                 asyncio.create_task(delete_message_delayed(message.chat.id, message.message_id, delay=5))
         else:
