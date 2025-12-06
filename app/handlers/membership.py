@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
@@ -61,7 +62,9 @@ async def _apply_bot_action(
     # Предупреждаем пользователя
     if action == ACTION_WARN and user:
         try:
-            user_mention = f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
+            # Экранируем HTML-символы в имени пользователя
+            safe_name = html.escape(user.full_name)
+            user_mention = f'<a href="tg://user?id={user.id}">{safe_name}</a>'
             warning_text = get_warn_message(settings, "bots")
             warn_msg = await bot.send_message(
                 chat_id,

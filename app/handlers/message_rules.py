@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import re
 from typing import Iterable
@@ -6,7 +7,7 @@ from aiogram import Bot, Router
 from aiogram.enums import ChatMemberStatus, ChatType, ContentType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import ChatPermissions, Message
+from aiogram.types import ChatPermissions, Message, User
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.database import (
     ACTION_NONE, ACTION_DELETE, ACTION_WARN, ACTION_KICK, ACTION_BAN,
@@ -135,7 +136,9 @@ async def apply_action(
     # Отправляем предупреждение
     if action == ACTION_WARN and user:
         try:
-            user_mention = f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
+            # Экранируем HTML-символы в имени пользователя
+            safe_name = html.escape(user.full_name)
+            user_mention = f'<a href="tg://user?id={user.id}">{safe_name}</a>'
             warning_text = get_warn_message(settings, violation_type)
             warn_msg = await bot.send_message(
                 chat_id,
@@ -201,7 +204,7 @@ async def start_command(message: Message) -> None:
 
 @router.message(Command(commands=["trust"]))
 async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
-    """Добавить пользователя в доверенные через ответ на сообщение или юзернейм."""
+    """Добавить пользователя в доверенные через ответ на сообщение или user_id."""
     if message.chat.type not in {ChatType.SUPERGROUP, ChatType.GROUP}:
         return
 
@@ -212,76 +215,79 @@ async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
     if not await is_admin(bot, message.chat.id, message.from_user.id):
         return
 
-    target_user = None
-    target_user_name = None
+    target_user: User | None = None
+    target_user_name: str | None = None
 
-    # Проверяем аргументы команды (юзернейм или user_id)
-    if message.text:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) > 1:
-            arg = parts[1].strip()
-            # Убираем @ если есть
-            if arg.startswith("@"):
-                arg = arg[1:]
+    # Сначала проверяем ответ на сообщение (приоритет)
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_user_name = target_user.full_name
+    else:
+        # Проверяем аргументы команды
+        if message.text:
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                arg = parts[1].strip()
 
-            # Пробуем найти пользователя по юзернейму через entities
-            if message.entities:
-                for entity in message.entities:
-                    if entity.type == "mention":
-                        # Получаем текст упоминания
-                        mention_text = message.text[entity.offset:entity.offset + entity.length]
-                        if mention_text.startswith("@"):
-                            mention_text = mention_text[1:]
-                        if mention_text.lower() == arg.lower():
-                            # Ищем user_id через text_mention или пробуем получить из кэша бота
-                            pass
-                    elif entity.type == "text_mention" and entity.user:
-                        # Прямое упоминание пользователя
-                        target_user = entity.user
-                        target_user_name = target_user.full_name
-                        break
-
-            # Если это числовой ID
-            if not target_user and arg.isdigit():
-                user_id = int(arg)
-                try:
-                    chat_member = await bot.get_chat_member(message.chat.id, user_id)
-                    if chat_member.user:
-                        target_user = chat_member.user
-                        target_user_name = target_user.full_name
-                except TelegramAPIError:
-                    pass
-
-            # Если это юзернейм — ищем через text_mention в entities
-            if not target_user and not arg.isdigit():
-                # Попробуем найти пользователя через упоминание в сообщении
-                # К сожалению, Telegram Bot API не позволяет искать по юзернейму напрямую
-                # Но если пользователь упомянут через @username, он будет в entities
+                # Проверяем entities на text_mention (когда Telegram резолвит пользователя)
                 for entity in (message.entities or []):
                     if entity.type == "text_mention" and entity.user:
                         target_user = entity.user
                         target_user_name = target_user.full_name
                         break
 
-    # Если не нашли через аргументы, проверяем ответ на сообщение
+                # Если это числовой ID
+                if not target_user:
+                    # Убираем @ если есть для проверки на число
+                    clean_arg = arg.lstrip("@")
+                    if clean_arg.isdigit():
+                        user_id = int(clean_arg)
+                        try:
+                            chat_member = await bot.get_chat_member(message.chat.id, user_id)
+                            if chat_member.user:
+                                target_user = chat_member.user
+                                target_user_name = target_user.full_name
+                        except TelegramAPIError:
+                            try:
+                                reply = await message.reply(f"❌ Пользователь с ID {user_id} не найден в этом чате.")
+                                await asyncio.sleep(5)
+                                await reply.delete()
+                                await message.delete()
+                            except TelegramAPIError:
+                                pass
+                            return
+
+                # Если передан @username, но не text_mention — Telegram не смог резолвить
+                if not target_user and arg.startswith("@"):
+                    try:
+                        reply = await message.reply(
+                            f"❌ Не удалось найти пользователя <code>{html.escape(arg)}</code>.\n\n"
+                            "Telegram не позволяет искать по юзернейму напрямую.\n"
+                            "Используйте:\n"
+                            "• Ответ на сообщение пользователя\n"
+                            "• <code>/trust user_id</code> (числовой ID)"
+                        )
+                        await asyncio.sleep(7)
+                        await reply.delete()
+                        await message.delete()
+                    except TelegramAPIError:
+                        pass
+                    return
+
+    # Если пользователь не найден
     if not target_user:
-        if message.reply_to_message and message.reply_to_message.from_user:
-            target_user = message.reply_to_message.from_user
-            target_user_name = target_user.full_name
-        else:
-            try:
-                reply = await message.reply(
-                    "Использование:\n"
-                    "• Ответьте на сообщение пользователя\n"
-                    "• Или: <code>/trust @username</code>\n"
-                    "• Или: <code>/trust user_id</code>"
-                )
-                await asyncio.sleep(5)
-                await reply.delete()
-                await message.delete()
-            except TelegramAPIError:
-                pass
-            return
+        try:
+            reply = await message.reply(
+                "Использование:\n"
+                "• Ответьте на сообщение пользователя\n"
+                "• Или: <code>/trust user_id</code>"
+            )
+            await asyncio.sleep(5)
+            await reply.delete()
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        return
 
     if target_user.is_bot:
         try:
@@ -296,8 +302,8 @@ async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
     await db.add_confirmed_user(message.chat.id, target_user.id)
 
     try:
-        user_name = target_user_name or str(target_user.id)
-        reply = await message.reply(f"✅ <b>{user_name}</b> добавлен в доверенные.")
+        safe_name = html.escape(target_user_name or str(target_user.id))
+        reply = await message.reply(f"✅ <b>{safe_name}</b> добавлен в доверенные.")
         await asyncio.sleep(5)
         await reply.delete()
         await message.delete()
@@ -307,7 +313,7 @@ async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
 
 @router.message(Command(commands=["untrust"]))
 async def untrust_user_command(message: Message, bot: Bot, db: Database) -> None:
-    """Удалить пользователя из доверенных через ответ на сообщение или юзернейм."""
+    """Удалить пользователя из доверенных через ответ на сообщение или user_id."""
     if message.chat.type not in {ChatType.SUPERGROUP, ChatType.GROUP}:
         return
 
@@ -318,61 +324,84 @@ async def untrust_user_command(message: Message, bot: Bot, db: Database) -> None
     if not await is_admin(bot, message.chat.id, message.from_user.id):
         return
 
-    target_user = None
-    target_user_name = None
+    target_user: User | None = None
+    target_user_name: str | None = None
 
-    # Проверяем аргументы команды (юзернейм или user_id)
-    if message.text:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) > 1:
-            arg = parts[1].strip()
-            # Убираем @ если есть
-            if arg.startswith("@"):
-                arg = arg[1:]
+    # Сначала проверяем ответ на сообщение (приоритет)
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_user_name = target_user.full_name
+    else:
+        # Проверяем аргументы команды
+        if message.text:
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                arg = parts[1].strip()
 
-            # Проверяем entities на text_mention
-            for entity in (message.entities or []):
-                if entity.type == "text_mention" and entity.user:
-                    target_user = entity.user
-                    target_user_name = target_user.full_name
-                    break
-
-            # Если это числовой ID
-            if not target_user and arg.isdigit():
-                user_id = int(arg)
-                try:
-                    chat_member = await bot.get_chat_member(message.chat.id, user_id)
-                    if chat_member.user:
-                        target_user = chat_member.user
+                # Проверяем entities на text_mention
+                for entity in (message.entities or []):
+                    if entity.type == "text_mention" and entity.user:
+                        target_user = entity.user
                         target_user_name = target_user.full_name
-                except TelegramAPIError:
-                    pass
+                        break
 
-    # Если не нашли через аргументы, проверяем ответ на сообщение
+                # Если это числовой ID
+                if not target_user:
+                    clean_arg = arg.lstrip("@")
+                    if clean_arg.isdigit():
+                        user_id = int(clean_arg)
+                        try:
+                            chat_member = await bot.get_chat_member(message.chat.id, user_id)
+                            if chat_member.user:
+                                target_user = chat_member.user
+                                target_user_name = target_user.full_name
+                        except TelegramAPIError:
+                            try:
+                                reply = await message.reply(f"❌ Пользователь с ID {user_id} не найден в этом чате.")
+                                await asyncio.sleep(5)
+                                await reply.delete()
+                                await message.delete()
+                            except TelegramAPIError:
+                                pass
+                            return
+
+                # Если передан @username, но не text_mention
+                if not target_user and arg.startswith("@"):
+                    try:
+                        reply = await message.reply(
+                            f"❌ Не удалось найти пользователя <code>{html.escape(arg)}</code>.\n\n"
+                            "Telegram не позволяет искать по юзернейму напрямую.\n"
+                            "Используйте:\n"
+                            "• Ответ на сообщение пользователя\n"
+                            "• <code>/untrust user_id</code> (числовой ID)"
+                        )
+                        await asyncio.sleep(7)
+                        await reply.delete()
+                        await message.delete()
+                    except TelegramAPIError:
+                        pass
+                    return
+
+    # Если пользователь не найден
     if not target_user:
-        if message.reply_to_message and message.reply_to_message.from_user:
-            target_user = message.reply_to_message.from_user
-            target_user_name = target_user.full_name
-        else:
-            try:
-                reply = await message.reply(
-                    "Использование:\n"
-                    "• Ответьте на сообщение пользователя\n"
-                    "• Или: <code>/untrust @username</code>\n"
-                    "• Или: <code>/untrust user_id</code>"
-                )
-                await asyncio.sleep(5)
-                await reply.delete()
-                await message.delete()
-            except TelegramAPIError:
-                pass
-            return
+        try:
+            reply = await message.reply(
+                "Использование:\n"
+                "• Ответьте на сообщение пользователя\n"
+                "• Или: <code>/untrust user_id</code>"
+            )
+            await asyncio.sleep(5)
+            await reply.delete()
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        return
 
     await db.remove_confirmed_user(message.chat.id, target_user.id)
 
     try:
-        user_name = target_user_name or str(target_user.id)
-        reply = await message.reply(f"❌ <b>{user_name}</b> удалён из доверенных.")
+        safe_name = html.escape(target_user_name or str(target_user.id))
+        reply = await message.reply(f"❌ <b>{safe_name}</b> удалён из доверенных.")
         await asyncio.sleep(5)
         await reply.delete()
         await message.delete()
