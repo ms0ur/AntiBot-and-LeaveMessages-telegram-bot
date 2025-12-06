@@ -4,12 +4,24 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import ChatBoostUpdated, Message
-from app.database import ACTION_NONE, ACTION_DELETE, ACTION_WARN, ACTION_KICK, ACTION_BAN, Database
+from app.database import (
+    ACTION_NONE, ACTION_DELETE, ACTION_WARN, ACTION_KICK, ACTION_BAN,
+    ChatSettings, Database, DEFAULT_WARN_MESSAGES,
+)
 from app.utils import is_admin
 
 router = Router()
 
 logger = logging.getLogger(__name__)
+
+
+def get_warn_message(settings: ChatSettings, violation_type: str) -> str:
+    """Получить сообщение для предупреждения (кастомное или стандартное)."""
+    field_name = f"warn_message_{violation_type}"
+    custom_message = getattr(settings, field_name, "")
+    if custom_message:
+        return custom_message
+    return DEFAULT_WARN_MESSAGES.get(violation_type, "⚠️ {user}, это действие запрещено.")
 
 
 async def _delete_join_leave(message: Message) -> None:
@@ -22,7 +34,9 @@ async def _delete_join_leave(message: Message) -> None:
         logger.warning("Failed to delete join/leave message %s: %s", message.message_id, exc)
 
 
-async def _apply_bot_action(bot: Bot, db: Database, message: Message, action: int, added_bot_id: int) -> None:
+async def _apply_bot_action(
+    bot: Bot, db: Database, message: Message, action: int, added_bot_id: int, settings: ChatSettings
+) -> None:
     """Применить действие за добавление бота не-админом."""
     user = message.from_user
     chat_id = message.chat.id
@@ -48,9 +62,10 @@ async def _apply_bot_action(bot: Bot, db: Database, message: Message, action: in
     if action == ACTION_WARN and user:
         try:
             user_mention = f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
+            warning_text = get_warn_message(settings, "bots")
             warn_msg = await bot.send_message(
                 chat_id,
-                f"⚠️ {user_mention}, добавлять ботов могут только администраторы!",
+                warning_text.format(user=user_mention),
             )
             await asyncio.sleep(10)
             await warn_msg.delete()
@@ -90,7 +105,7 @@ async def handle_new_members(message: Message, bot: Bot, db: Database) -> None:
     for member in message.new_chat_members:
         if member.is_bot and not adder_is_admin:
             # Применяем настроенное действие
-            await _apply_bot_action(bot, db, message, settings.action_bots, member.id)
+            await _apply_bot_action(bot, db, message, settings.action_bots, member.id, settings)
         elif not member.is_bot:
             await _delete_join_leave(message)
 

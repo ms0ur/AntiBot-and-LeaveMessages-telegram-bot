@@ -44,6 +44,26 @@ class ChatSettings:
     action_global_ban: int = ACTION_BAN      # Действие для глобально забаненных
     # Дополнительные настройки
     trust_boosters: bool = True              # Автоматически доверять бустерам группы
+    # Кастомные сообщения при нарушениях ({user} будет заменён на упоминание)
+    warn_message_media: str = ""             # Сообщение при запрещённом медиа
+    warn_message_stickers: str = ""          # Сообщение при запрещённых стикерах
+    warn_message_links: str = ""             # Сообщение при запрещённых ссылках
+    warn_message_voice: str = ""             # Сообщение при запрещённых голосовых
+    warn_message_words: str = ""             # Сообщение при запрещённых словах
+    warn_message_bots: str = ""              # Сообщение при добавлении ботов
+    warn_message_global_ban: str = ""        # Сообщение для глобально забаненных
+
+
+# Сообщения по умолчанию
+DEFAULT_WARN_MESSAGES = {
+    "media": "⚠️ {user}, отправка медиа запрещена в этом чате.",
+    "stickers": "⚠️ {user}, отправка стикеров запрещена в этом чате.",
+    "links": "⚠️ {user}, отправка ссылок запрещена в этом чате.",
+    "voice": "⚠️ {user}, отправка голосовых сообщений запрещена в этом чате.",
+    "words": "⚠️ {user}, ваше сообщение содержит запрещённые слова.",
+    "bots": "⚠️ {user}, добавлять ботов могут только администраторы!",
+    "global_ban": "⚠️ {user}, вы находитесь в глобальном бан-листе.",
+}
 
 
 class Database:
@@ -113,6 +133,13 @@ class Database:
                 action_bots INTEGER NOT NULL DEFAULT 4,
                 action_global_ban INTEGER NOT NULL DEFAULT 4,
                 trust_boosters INTEGER NOT NULL DEFAULT 1,
+                warn_message_media TEXT NOT NULL DEFAULT '',
+                warn_message_stickers TEXT NOT NULL DEFAULT '',
+                warn_message_links TEXT NOT NULL DEFAULT '',
+                warn_message_voice TEXT NOT NULL DEFAULT '',
+                warn_message_words TEXT NOT NULL DEFAULT '',
+                warn_message_bots TEXT NOT NULL DEFAULT '',
+                warn_message_global_ban TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (chat_id) REFERENCES known_chats(chat_id) ON DELETE CASCADE
             );
 
@@ -151,6 +178,13 @@ class Database:
             ("action_bots", "INTEGER NOT NULL DEFAULT 4"),
             ("action_global_ban", "INTEGER NOT NULL DEFAULT 4"),
             ("trust_boosters", "INTEGER NOT NULL DEFAULT 1"),
+            ("warn_message_media", "TEXT NOT NULL DEFAULT ''"),
+            ("warn_message_stickers", "TEXT NOT NULL DEFAULT ''"),
+            ("warn_message_links", "TEXT NOT NULL DEFAULT ''"),
+            ("warn_message_voice", "TEXT NOT NULL DEFAULT ''"),
+            ("warn_message_words", "TEXT NOT NULL DEFAULT ''"),
+            ("warn_message_bots", "TEXT NOT NULL DEFAULT ''"),
+            ("warn_message_global_ban", "TEXT NOT NULL DEFAULT ''"),
         ]
 
         for column_name, column_def in new_columns:
@@ -277,7 +311,10 @@ class Database:
                       restrict_media_confirmed, restrict_stickers_confirmed,
                       restrict_links_confirmed, restrict_voice_confirmed,
                       action_media, action_stickers, action_links, action_voice,
-                      action_words, action_bots, action_global_ban, trust_boosters
+                      action_words, action_bots, action_global_ban, trust_boosters,
+                      warn_message_media, warn_message_stickers, warn_message_links,
+                      warn_message_voice, warn_message_words, warn_message_bots,
+                      warn_message_global_ban
                FROM chat_settings WHERE chat_id = ?""",
             (chat_id,),
         )
@@ -300,6 +337,13 @@ class Database:
                 action_bots=row[14],
                 action_global_ban=row[15],
                 trust_boosters=bool(row[16]),
+                warn_message_media=row[17] or "",
+                warn_message_stickers=row[18] or "",
+                warn_message_links=row[19] or "",
+                warn_message_voice=row[20] or "",
+                warn_message_words=row[21] or "",
+                warn_message_bots=row[22] or "",
+                warn_message_global_ban=row[23] or "",
             )
         return ChatSettings(chat_id=chat_id)
 
@@ -312,8 +356,11 @@ class Database:
                    restrict_media_confirmed, restrict_stickers_confirmed,
                    restrict_links_confirmed, restrict_voice_confirmed,
                    action_media, action_stickers, action_links, action_voice,
-                   action_words, action_bots, action_global_ban, trust_boosters
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   action_words, action_bots, action_global_ban, trust_boosters,
+                   warn_message_media, warn_message_stickers, warn_message_links,
+                   warn_message_voice, warn_message_words, warn_message_bots,
+                   warn_message_global_ban
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(chat_id) DO UPDATE SET
                    restrict_media_regular = excluded.restrict_media_regular,
                    restrict_stickers_regular = excluded.restrict_stickers_regular,
@@ -330,7 +377,14 @@ class Database:
                    action_words = excluded.action_words,
                    action_bots = excluded.action_bots,
                    action_global_ban = excluded.action_global_ban,
-                   trust_boosters = excluded.trust_boosters""",
+                   trust_boosters = excluded.trust_boosters,
+                   warn_message_media = excluded.warn_message_media,
+                   warn_message_stickers = excluded.warn_message_stickers,
+                   warn_message_links = excluded.warn_message_links,
+                   warn_message_voice = excluded.warn_message_voice,
+                   warn_message_words = excluded.warn_message_words,
+                   warn_message_bots = excluded.warn_message_bots,
+                   warn_message_global_ban = excluded.warn_message_global_ban""",
             (
                 settings.chat_id,
                 int(settings.restrict_media_regular),
@@ -349,6 +403,13 @@ class Database:
                 settings.action_bots,
                 settings.action_global_ban,
                 int(settings.trust_boosters),
+                settings.warn_message_media,
+                settings.warn_message_stickers,
+                settings.warn_message_links,
+                settings.warn_message_voice,
+                settings.warn_message_words,
+                settings.warn_message_bots,
+                settings.warn_message_global_ban,
             ),
         )
 
@@ -369,6 +430,18 @@ class Database:
         setattr(settings, setting_name, new_value)
         await self.update_chat_settings(settings)
         return new_value
+
+    async def set_warn_message(self, chat_id: int, message_type: str, text: str) -> None:
+        """Установить кастомное сообщение для типа нарушения."""
+        settings = await self.get_chat_settings(chat_id)
+        field_name = f"warn_message_{message_type}"
+        if hasattr(settings, field_name):
+            setattr(settings, field_name, text)
+            await self.update_chat_settings(settings)
+
+    async def reset_warn_message(self, chat_id: int, message_type: str) -> None:
+        """Сбросить кастомное сообщение на стандартное."""
+        await self.set_warn_message(chat_id, message_type, "")
 
     # === Статистика ===
 

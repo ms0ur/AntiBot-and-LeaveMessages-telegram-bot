@@ -10,7 +10,7 @@ from aiogram.types import ChatPermissions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.database import (
     ACTION_NONE, ACTION_DELETE, ACTION_WARN, ACTION_KICK, ACTION_BAN,
-    ChatSettings, Database,
+    ChatSettings, Database, DEFAULT_WARN_MESSAGES,
 )
 from app.utils import is_admin
 
@@ -46,19 +46,18 @@ URL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Сообщения предупреждений
-WARNING_MESSAGES = {
-    "media": "⚠️ {user}, отправка медиа запрещена в этом чате.",
-    "stickers": "⚠️ {user}, отправка стикеров запрещена в этом чате.",
-    "links": "⚠️ {user}, отправка ссылок запрещена в этом чате.",
-    "voice": "⚠️ {user}, отправка голосовых сообщений запрещена в этом чате.",
-    "words": "⚠️ {user}, ваше сообщение содержит запрещённые слова.",
-    "global_ban": "⚠️ {user}, вы находитесь в глобальном бан-листе.",
-}
-
 
 def extract_text(message: Message) -> str:
     return (message.text or message.caption or "").lower()
+
+
+def get_warn_message(settings: ChatSettings, violation_type: str) -> str:
+    """Получить сообщение для предупреждения (кастомное или стандартное)."""
+    field_name = f"warn_message_{violation_type}"
+    custom_message = getattr(settings, field_name, "")
+    if custom_message:
+        return custom_message
+    return DEFAULT_WARN_MESSAGES.get(violation_type, "⚠️ {user}, это действие запрещено.")
 
 
 async def is_confirmed_user(bot: Bot, db: Database, chat_id: int, user_id: int) -> bool:
@@ -106,6 +105,7 @@ async def apply_action(
     message: Message,
     action: int,
     violation_type: str,
+    settings: ChatSettings,
 ) -> None:
     """Применить действие к нарушителю."""
     logger.debug(
@@ -136,7 +136,7 @@ async def apply_action(
     if action == ACTION_WARN and user:
         try:
             user_mention = f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
-            warning_text = WARNING_MESSAGES.get(violation_type, "⚠️ {user}, это действие запрещено.")
+            warning_text = get_warn_message(settings, violation_type)
             warn_msg = await bot.send_message(
                 chat_id,
                 warning_text.format(user=user_mention),
@@ -201,7 +201,7 @@ async def start_command(message: Message) -> None:
 
 @router.message(Command(commands=["trust"]))
 async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
-    """Добавить пользователя в доверенные через ответ на сообщение в группе."""
+    """Добавить пользователя в доверенные через ответ на сообщение или юзернейм."""
     if message.chat.type not in {ChatType.SUPERGROUP, ChatType.GROUP}:
         return
 
@@ -212,18 +212,77 @@ async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
     if not await is_admin(bot, message.chat.id, message.from_user.id):
         return
 
-    # Должен быть ответ на сообщение
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        try:
-            reply = await message.reply("Ответьте на сообщение пользователя, которого хотите добавить в доверенные.")
-            await asyncio.sleep(5)
-            await reply.delete()
-            await message.delete()
-        except TelegramAPIError:
-            pass
-        return
+    target_user = None
+    target_user_name = None
 
-    target_user = message.reply_to_message.from_user
+    # Проверяем аргументы команды (юзернейм или user_id)
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            arg = parts[1].strip()
+            # Убираем @ если есть
+            if arg.startswith("@"):
+                arg = arg[1:]
+
+            # Пробуем найти пользователя по юзернейму через entities
+            if message.entities:
+                for entity in message.entities:
+                    if entity.type == "mention":
+                        # Получаем текст упоминания
+                        mention_text = message.text[entity.offset:entity.offset + entity.length]
+                        if mention_text.startswith("@"):
+                            mention_text = mention_text[1:]
+                        if mention_text.lower() == arg.lower():
+                            # Ищем user_id через text_mention или пробуем получить из кэша бота
+                            pass
+                    elif entity.type == "text_mention" and entity.user:
+                        # Прямое упоминание пользователя
+                        target_user = entity.user
+                        target_user_name = target_user.full_name
+                        break
+
+            # Если это числовой ID
+            if not target_user and arg.isdigit():
+                user_id = int(arg)
+                try:
+                    chat_member = await bot.get_chat_member(message.chat.id, user_id)
+                    if chat_member.user:
+                        target_user = chat_member.user
+                        target_user_name = target_user.full_name
+                except TelegramAPIError:
+                    pass
+
+            # Если это юзернейм — ищем через text_mention в entities
+            if not target_user and not arg.isdigit():
+                # Попробуем найти пользователя через упоминание в сообщении
+                # К сожалению, Telegram Bot API не позволяет искать по юзернейму напрямую
+                # Но если пользователь упомянут через @username, он будет в entities
+                for entity in (message.entities or []):
+                    if entity.type == "text_mention" and entity.user:
+                        target_user = entity.user
+                        target_user_name = target_user.full_name
+                        break
+
+    # Если не нашли через аргументы, проверяем ответ на сообщение
+    if not target_user:
+        if message.reply_to_message and message.reply_to_message.from_user:
+            target_user = message.reply_to_message.from_user
+            target_user_name = target_user.full_name
+        else:
+            try:
+                reply = await message.reply(
+                    "Использование:\n"
+                    "• Ответьте на сообщение пользователя\n"
+                    "• Или: <code>/trust @username</code>\n"
+                    "• Или: <code>/trust user_id</code>"
+                )
+                await asyncio.sleep(5)
+                await reply.delete()
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            return
+
     if target_user.is_bot:
         try:
             reply = await message.reply("Нельзя добавить бота в доверенные.")
@@ -237,7 +296,7 @@ async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
     await db.add_confirmed_user(message.chat.id, target_user.id)
 
     try:
-        user_name = target_user.full_name or str(target_user.id)
+        user_name = target_user_name or str(target_user.id)
         reply = await message.reply(f"✅ <b>{user_name}</b> добавлен в доверенные.")
         await asyncio.sleep(5)
         await reply.delete()
@@ -248,7 +307,7 @@ async def trust_user_command(message: Message, bot: Bot, db: Database) -> None:
 
 @router.message(Command(commands=["untrust"]))
 async def untrust_user_command(message: Message, bot: Bot, db: Database) -> None:
-    """Удалить пользователя из доверенных через ответ на сообщение в группе."""
+    """Удалить пользователя из доверенных через ответ на сообщение или юзернейм."""
     if message.chat.type not in {ChatType.SUPERGROUP, ChatType.GROUP}:
         return
 
@@ -259,23 +318,60 @@ async def untrust_user_command(message: Message, bot: Bot, db: Database) -> None
     if not await is_admin(bot, message.chat.id, message.from_user.id):
         return
 
-    # Должен быть ответ на сообщение
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        try:
-            reply = await message.reply("Ответьте на сообщение пользователя, которого хотите убрать из доверенных.")
-            await asyncio.sleep(5)
-            await reply.delete()
-            await message.delete()
-        except TelegramAPIError:
-            pass
-        return
+    target_user = None
+    target_user_name = None
 
-    target_user = message.reply_to_message.from_user
+    # Проверяем аргументы команды (юзернейм или user_id)
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            arg = parts[1].strip()
+            # Убираем @ если есть
+            if arg.startswith("@"):
+                arg = arg[1:]
+
+            # Проверяем entities на text_mention
+            for entity in (message.entities or []):
+                if entity.type == "text_mention" and entity.user:
+                    target_user = entity.user
+                    target_user_name = target_user.full_name
+                    break
+
+            # Если это числовой ID
+            if not target_user and arg.isdigit():
+                user_id = int(arg)
+                try:
+                    chat_member = await bot.get_chat_member(message.chat.id, user_id)
+                    if chat_member.user:
+                        target_user = chat_member.user
+                        target_user_name = target_user.full_name
+                except TelegramAPIError:
+                    pass
+
+    # Если не нашли через аргументы, проверяем ответ на сообщение
+    if not target_user:
+        if message.reply_to_message and message.reply_to_message.from_user:
+            target_user = message.reply_to_message.from_user
+            target_user_name = target_user.full_name
+        else:
+            try:
+                reply = await message.reply(
+                    "Использование:\n"
+                    "• Ответьте на сообщение пользователя\n"
+                    "• Или: <code>/untrust @username</code>\n"
+                    "• Или: <code>/untrust user_id</code>"
+                )
+                await asyncio.sleep(5)
+                await reply.delete()
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            return
 
     await db.remove_confirmed_user(message.chat.id, target_user.id)
 
     try:
-        user_name = target_user.full_name or str(target_user.id)
+        user_name = target_user_name or str(target_user.id)
         reply = await message.reply(f"❌ <b>{user_name}</b> удалён из доверенных.")
         await asyncio.sleep(5)
         await reply.delete()
@@ -325,7 +421,7 @@ async def enforce_rules(message: Message, bot: Bot, db: Database) -> None:
     # Глобально забаненные пользователи
     if await db.is_global_banned(user_id):
         logger.debug("User %s is globally banned, applying action", user_id)
-        await apply_action(bot, db, message, settings.action_global_ban, "global_ban")
+        await apply_action(bot, db, message, settings.action_global_ban, "global_ban", settings)
         return
 
     # Проверяем, является ли пользователь доверенным (подтверждённым, админом или бустером)
@@ -338,12 +434,12 @@ async def enforce_rules(message: Message, bot: Bot, db: Database) -> None:
         if user_is_confirmed:
             if settings.restrict_media_confirmed:
                 logger.debug("Restricting media for confirmed user")
-                await apply_action(bot, db, message, settings.action_media, "media")
+                await apply_action(bot, db, message, settings.action_media, "media", settings)
                 return
         else:
             if settings.restrict_media_regular:
                 logger.debug("Restricting media for regular user")
-                await apply_action(bot, db, message, settings.action_media, "media")
+                await apply_action(bot, db, message, settings.action_media, "media", settings)
                 return
 
     # Проверяем стикеры
@@ -352,12 +448,12 @@ async def enforce_rules(message: Message, bot: Bot, db: Database) -> None:
         if user_is_confirmed:
             if settings.restrict_stickers_confirmed:
                 logger.debug("Restricting sticker for confirmed user")
-                await apply_action(bot, db, message, settings.action_stickers, "stickers")
+                await apply_action(bot, db, message, settings.action_stickers, "stickers", settings)
                 return
         else:
             if settings.restrict_stickers_regular:
                 logger.debug("Restricting sticker for regular user, action=%s", settings.action_stickers)
-                await apply_action(bot, db, message, settings.action_stickers, "stickers")
+                await apply_action(bot, db, message, settings.action_stickers, "stickers", settings)
                 return
             else:
                 logger.debug("Stickers allowed for regular users (restrict_stickers_regular=False)")
@@ -368,12 +464,12 @@ async def enforce_rules(message: Message, bot: Bot, db: Database) -> None:
         if user_is_confirmed:
             if settings.restrict_voice_confirmed:
                 logger.debug("Restricting voice for confirmed user")
-                await apply_action(bot, db, message, settings.action_voice, "voice")
+                await apply_action(bot, db, message, settings.action_voice, "voice", settings)
                 return
         else:
             if settings.restrict_voice_regular:
                 logger.debug("Restricting voice for regular user")
-                await apply_action(bot, db, message, settings.action_voice, "voice")
+                await apply_action(bot, db, message, settings.action_voice, "voice", settings)
                 return
 
     # Проверяем ссылки в тексте
@@ -383,19 +479,19 @@ async def enforce_rules(message: Message, bot: Bot, db: Database) -> None:
         if user_is_confirmed:
             if settings.restrict_links_confirmed:
                 logger.debug("Restricting links for confirmed user")
-                await apply_action(bot, db, message, settings.action_links, "links")
+                await apply_action(bot, db, message, settings.action_links, "links", settings)
                 return
         else:
             if settings.restrict_links_regular:
                 logger.debug("Restricting links for regular user")
-                await apply_action(bot, db, message, settings.action_links, "links")
+                await apply_action(bot, db, message, settings.action_links, "links", settings)
                 return
 
     # Проверяем запрещённые слова
     banned_words = await db.get_banned_words(chat_id)
     if banned_words and contains_banned_word(text_content, banned_words):
         logger.debug("Message contains banned word")
-        await apply_action(bot, db, message, settings.action_words, "words")
+        await apply_action(bot, db, message, settings.action_words, "words", settings)
         return
 
     logger.debug("Message passed all checks, no action taken")

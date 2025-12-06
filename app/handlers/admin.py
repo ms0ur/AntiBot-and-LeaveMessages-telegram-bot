@@ -3,14 +3,21 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from app.database import ACTION_LABELS, ChatSettings, Database
+from app.database import ACTION_LABELS, ChatSettings, Database, DEFAULT_WARN_MESSAGES
 from app.utils import is_admin, is_superadmin
 
 router = Router()
 
 logger = logging.getLogger(__name__)
+
+
+# FSM состояния для редактирования сообщений
+class EditMessageState(StatesGroup):
+    waiting_for_message = State()
 
 
 def _ensure_private(message: Message) -> bool:
@@ -89,6 +96,7 @@ def _main_menu_keyboard(user_id: int | None = None) -> InlineKeyboardBuilder:
     kb.button(text="⚙️ Настройки (выбор чата)", callback_data="settings")
     kb.button(text="🛡️ Ограничения контента", callback_data="menu:restrictions")
     kb.button(text="⚡ Действия при нарушениях", callback_data="menu:actions")
+    kb.button(text="💬 Сообщения при нарушениях", callback_data="menu:messages")
     kb.button(text="👥 Управление пользователями", callback_data="menu:users")
     kb.button(text="🚫 Банлист слов", callback_data="menu:words")
     kb.button(text="ℹ️ Помощь", callback_data="menu:help")
@@ -245,6 +253,49 @@ def _actions_keyboard(settings: ChatSettings) -> InlineKeyboardBuilder:
     return kb
 
 
+def _messages_keyboard(settings: ChatSettings) -> InlineKeyboardBuilder:
+    """Клавиатура настроек кастомных сообщений."""
+    kb = InlineKeyboardBuilder()
+
+    def has_custom(field: str) -> str:
+        value = getattr(settings, field, "")
+        return "✏️" if value else "📝"
+
+    kb.button(
+        text=f"{has_custom('warn_message_media')} Медиа",
+        callback_data="msg:edit:media"
+    )
+    kb.button(
+        text=f"{has_custom('warn_message_stickers')} Стикеры",
+        callback_data="msg:edit:stickers"
+    )
+    kb.button(
+        text=f"{has_custom('warn_message_links')} Ссылки",
+        callback_data="msg:edit:links"
+    )
+    kb.button(
+        text=f"{has_custom('warn_message_voice')} Голосовые",
+        callback_data="msg:edit:voice"
+    )
+    kb.button(
+        text=f"{has_custom('warn_message_words')} Запрещ. слова",
+        callback_data="msg:edit:words"
+    )
+    kb.button(
+        text=f"{has_custom('warn_message_bots')} Добавление ботов",
+        callback_data="msg:edit:bots"
+    )
+    kb.button(
+        text=f"{has_custom('warn_message_global_ban')} Глоб. бан-лист",
+        callback_data="msg:edit:global_ban"
+    )
+
+    kb.adjust(2)
+    kb.button(text="◀️ Назад в меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb
+
+
 def _superadmin_menu_keyboard() -> InlineKeyboardBuilder:
     """Меню супер-админа."""
     kb = InlineKeyboardBuilder()
@@ -276,7 +327,7 @@ async def confirm_user(message: Message, bot: Bot, db: Database) -> None:
     args = _extract_command_arguments(message)
     chat_id, remaining = await _resolve_chat_id(message, db, args)
     if chat_id is None or len(remaining) != 1 or not remaining[0].isdigit():
-        await message.answer("Укажите /confirm <chat_id> <user_id> или выберите чат в настройках.")
+        await message.answer("Укажите /confirm [chat_id] [user_id] или выберите чат в настройках.")
         return
 
     chat_id_int = chat_id
@@ -298,7 +349,7 @@ async def unconfirm_user(message: Message, bot: Bot, db: Database) -> None:
     args = _extract_command_arguments(message)
     chat_id, remaining = await _resolve_chat_id(message, db, args)
     if chat_id is None or len(remaining) != 1 or not remaining[0].isdigit():
-        await message.answer("Укажите /unconfirm <chat_id> <user_id> или выберите чат в настройках.")
+        await message.answer("Укажите /unconfirm [chat_id] [user_id] или выберите чат в настройках.")
         return
 
     chat_id_int = chat_id
@@ -320,7 +371,7 @@ async def list_confirmed(message: Message, bot: Bot, db: Database) -> None:
     args = _extract_command_arguments(message)
     chat_id, remaining = await _resolve_chat_id(message, db, args)
     if chat_id is None or remaining:
-        await message.answer("Укажите /confirmed <chat_id> или выберите чат в настройках.")
+        await message.answer("Укажите /confirmed [chat_id] или выберите чат в настройках.")
         return
 
     chat_id_int = chat_id
@@ -348,7 +399,7 @@ async def add_banned_word(message: Message, bot: Bot, db: Database) -> None:
     args = _extract_command_arguments(message)
     chat_id, remaining = await _resolve_chat_id(message, db, args)
     if chat_id is None or not remaining:
-        await message.answer("Укажите /banword <chat_id> <слово> или выберите чат в настройках.")
+        await message.answer("Укажите /banword [chat_id] [слово] или выберите чат в настройках.")
         return
 
     chat_id_int = chat_id
@@ -373,7 +424,7 @@ async def remove_banned_word(message: Message, bot: Bot, db: Database) -> None:
     args = _extract_command_arguments(message)
     chat_id, remaining = await _resolve_chat_id(message, db, args)
     if chat_id is None or not remaining:
-        await message.answer("Укажите /unbanword <chat_id> <слово> или выберите чат в настройках.")
+        await message.answer("Укажите /unbanword [chat_id] [слово] или выберите чат в настройках.")
         return
 
     chat_id_int = chat_id
@@ -395,7 +446,7 @@ async def list_banned_words(message: Message, bot: Bot, db: Database) -> None:
     args = _extract_command_arguments(message)
     chat_id, remaining = await _resolve_chat_id(message, db, args)
     if chat_id is None or remaining:
-        await message.answer("Укажите /banwords <chat_id> или выберите чат в настройках.")
+        await message.answer("Укажите /banwords [chat_id] или выберите чат в настройках.")
         return
 
     chat_id_int = chat_id
@@ -695,6 +746,167 @@ async def cycle_action(callback: CallbackQuery, bot: Bot, db: Database) -> None:
         )
     except TelegramBadRequest:
         pass
+
+
+# === Кастомные сообщения ===
+
+# Названия типов сообщений
+MESSAGE_TYPE_LABELS = {
+    "media": "📷 Медиа",
+    "stickers": "😀 Стикеры",
+    "links": "🔗 Ссылки",
+    "voice": "🎤 Голосовые",
+    "words": "💬 Запрещённые слова",
+    "bots": "🤖 Добавление ботов",
+    "global_ban": "🚫 Глобальный бан-лист",
+}
+
+
+@router.callback_query(F.data == "menu:messages")
+async def show_messages_menu(callback: CallbackQuery, bot: Bot, db: Database) -> None:
+    """Меню настроек кастомных сообщений."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    if not await _validate_admin(bot, selected, callback.from_user.id):
+        await callback.answer("Нет прав администратора в этом чате!", show_alert=True)
+        return
+
+    settings = await db.get_chat_settings(selected)
+    builder = _messages_keyboard(settings)
+
+    await callback.message.edit_text(
+        "💬 <b>Сообщения при нарушениях</b>\n\n"
+        f"Активный чат: <code>{selected}</code>\n\n"
+        "Настройте текст предупреждений для каждого типа нарушения.\n"
+        "Используйте <code>{user}</code> для упоминания пользователя.\n\n"
+        "📝 = стандартное сообщение\n"
+        "✏️ = кастомное сообщение",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("msg:edit:"))
+async def edit_message_prompt(callback: CallbackQuery, bot: Bot, db: Database, state: FSMContext) -> None:
+    """Начало редактирования кастомного сообщения."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    if not await _validate_admin(bot, selected, callback.from_user.id):
+        await callback.answer("Нет прав администратора в этом чате!", show_alert=True)
+        return
+
+    message_type = callback.data.split(":", 2)[2]
+    if message_type not in MESSAGE_TYPE_LABELS:
+        await callback.answer("Неизвестный тип", show_alert=True)
+        return
+
+    settings = await db.get_chat_settings(selected)
+    field_name = f"warn_message_{message_type}"
+    current_message = getattr(settings, field_name, "")
+
+    from app.database import DEFAULT_WARN_MESSAGES
+    default_message = DEFAULT_WARN_MESSAGES.get(message_type, "")
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Сбросить на стандартное", callback_data=f"msg:reset:{message_type}")
+    kb.button(text="❌ Отмена", callback_data="menu:messages")
+    kb.adjust(1)
+
+    current_text = current_message if current_message else f"(стандартное) {default_message}"
+
+    await callback.message.edit_text(
+        f"✏️ <b>Редактирование: {MESSAGE_TYPE_LABELS[message_type]}</b>\n\n"
+        f"Текущее сообщение:\n<code>{current_text}</code>\n\n"
+        "Отправьте новое сообщение для этого нарушения.\n"
+        "Используйте <code>{user}</code> для упоминания пользователя.\n\n"
+        "Пример: <code>⚠️ {user}, это запрещено!</code>",
+        reply_markup=kb.as_markup(),
+    )
+
+    await state.set_state(EditMessageState.waiting_for_message)
+    await state.update_data(message_type=message_type, chat_id=selected)
+    await callback.answer()
+
+
+@router.message(EditMessageState.waiting_for_message)
+async def save_custom_message(message: Message, bot: Bot, db: Database, state: FSMContext) -> None:
+    """Сохранение кастомного сообщения."""
+    if not message.from_user or not message.text:
+        return
+
+    data = await state.get_data()
+    message_type = data.get("message_type")
+    chat_id = data.get("chat_id")
+
+    if not message_type or not chat_id:
+        await state.clear()
+        return
+
+    # Сохраняем сообщение
+    await db.set_warn_message(chat_id, message_type, message.text)
+    await state.clear()
+
+    # Показываем подтверждение и возвращаемся в меню
+    settings = await db.get_chat_settings(chat_id)
+    builder = _messages_keyboard(settings)
+
+    await message.answer(
+        f"✅ Сообщение для <b>{MESSAGE_TYPE_LABELS[message_type]}</b> сохранено!\n\n"
+        "💬 <b>Сообщения при нарушениях</b>\n\n"
+        f"Активный чат: <code>{chat_id}</code>\n\n"
+        "Настройте текст предупреждений для каждого типа нарушения.\n"
+        "Используйте <code>{user}</code> для упоминания пользователя.\n\n"
+        "📝 = стандартное сообщение\n"
+        "✏️ = кастомное сообщение",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("msg:reset:"))
+async def reset_custom_message(callback: CallbackQuery, bot: Bot, db: Database, state: FSMContext) -> None:
+    """Сброс кастомного сообщения на стандартное."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    message_type = callback.data.split(":", 2)[2]
+    if message_type not in MESSAGE_TYPE_LABELS:
+        await callback.answer("Неизвестный тип", show_alert=True)
+        return
+
+    await db.reset_warn_message(selected, message_type)
+    await state.clear()
+
+    settings = await db.get_chat_settings(selected)
+    builder = _messages_keyboard(settings)
+
+    await callback.message.edit_text(
+        f"✅ Сообщение для <b>{MESSAGE_TYPE_LABELS[message_type]}</b> сброшено на стандартное!\n\n"
+        "💬 <b>Сообщения при нарушениях</b>\n\n"
+        f"Активный чат: <code>{selected}</code>\n\n"
+        "Настройте текст предупреждений для каждого типа нарушения.\n"
+        "Используйте <code>{user}</code> для упоминания пользователя.\n\n"
+        "📝 = стандартное сообщение\n"
+        "✏️ = кастомное сообщение",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer("Сообщение сброшено")
 
 
 @router.callback_query(F.data == "users:confirmed:list")
