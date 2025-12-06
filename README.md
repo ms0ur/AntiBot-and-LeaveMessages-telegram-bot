@@ -19,6 +19,7 @@ reply_message = await message.reply(f"Bot || {member.first_name} || was banned, 
 
 ## How to setup
 Change `API_TOKEN ` in line 9
+set `PARSE_MODE` in your `.env` if you need something other than HTML
 run `python3 bot.py`
 add bot to chats
 enjoy!

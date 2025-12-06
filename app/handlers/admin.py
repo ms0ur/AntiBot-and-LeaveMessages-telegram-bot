@@ -1,7 +1,7 @@
 import logging
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatType
-from aiogram.exceptions import TelegramAPIError
+from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -67,14 +67,63 @@ async def _available_chats(bot: Bot, db: Database, user_id: int) -> list[tuple[i
     return allowed
 
 
-def _settings_keyboard(chats: list[tuple[int, str]]) -> InlineKeyboardBuilder:
+def _main_menu_keyboard() -> InlineKeyboardBuilder:
+    """Главное меню бота."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⚙️ Настройки (выбор чата)", callback_data="settings")
+    kb.button(text="👥 Управление пользователями", callback_data="menu:users")
+    kb.button(text="🚫 Банлист слов", callback_data="menu:words")
+    kb.button(text="ℹ️ Помощь", callback_data="menu:help")
+    kb.adjust(1)
+    return kb
+
+
+def _back_to_main_keyboard() -> InlineKeyboardBuilder:
+    """Кнопка возврата в главное меню."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="◀️ Назад в меню", callback_data="menu:main")
+    return kb
+
+
+def _settings_keyboard(chats: list[tuple[int, str]], selected_chat_id: int | None = None) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
     for chat_id, title in chats:
-        label = f"{title[:40]} ({chat_id})"
+        prefix = "✅ " if chat_id == selected_chat_id else ""
+        label = f"{prefix}{title[:35]} ({chat_id})"
         kb.button(text=label, callback_data=f"set_chat:{chat_id}")
     kb.adjust(1)
-    kb.button(text="Обновить список", callback_data="settings:refresh")
+    kb.button(text="🔄 Обновить список", callback_data="settings:refresh")
+    kb.button(text="◀️ Назад в меню", callback_data="menu:main")
     kb.adjust(1)
+    return kb
+
+
+def _users_menu_keyboard() -> InlineKeyboardBuilder:
+    """Меню управления пользователями."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвержденные", callback_data="users:confirmed:list")
+    kb.button(text="🚫 Забаненные", callback_data="users:banned:list")
+    kb.adjust(2)
+    kb.button(text="◀️ Назад в меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb
+
+
+def _words_menu_keyboard() -> InlineKeyboardBuilder:
+    """Меню управления запрещенными словами."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Список слов", callback_data="words:list")
+    kb.button(text="◀️ Назад в меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb
+
+
+def _list_back_keyboard(back_callback: str) -> InlineKeyboardBuilder:
+    """Клавиатура для списков с кнопкой назад."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="◀️ Назад", callback_data=back_callback)
+    kb.button(text="🏠 В меню", callback_data="menu:main")
+    kb.adjust(2)
     return kb
 
 
@@ -269,21 +318,241 @@ async def unban_user(message: Message, bot: Bot, db: Database) -> None:
     await message.answer("Пользователь удален из банлиста группы.")
 
 
+@router.callback_query(F.data == "menu:main")
+async def show_main_menu(callback: CallbackQuery) -> None:
+    """Показать главное меню."""
+    builder = _main_menu_keyboard()
+    await callback.message.edit_text(
+        "🤖 <b>Главное меню</b>\n\n"
+        "Выберите действие:",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:help")
+async def show_help(callback: CallbackQuery) -> None:
+    """Показать справку."""
+    builder = _back_to_main_keyboard()
+    await callback.message.edit_text(
+        "ℹ️ <b>Справка</b>\n\n"
+        "Этот бот помогает модерировать группы:\n"
+        "• Удаляет ботов, добавленных не-админами\n"
+        "• Удаляет сообщения о входе/выходе\n"
+        "• Фильтрует медиа от неподтверждённых\n"
+        "• Блокирует запрещённые слова\n\n"
+        "<b>Как начать:</b>\n"
+        "1. Добавьте бота в группу\n"
+        "2. Дайте боту права админа\n"
+        "3. Напишите что-нибудь в группе\n"
+        "4. Выберите группу в настройках\n\n"
+        "<b>Команды (можно использовать кнопки):</b>\n"
+        "<code>/confirm [user_id]</code> — подтвердить пользователя\n"
+        "<code>/unconfirm [user_id]</code> — убрать подтверждение\n"
+        "<code>/banuser [user_id]</code> — забанить в группе\n"
+        "<code>/unbanuser [user_id]</code> — разбанить\n"
+        "<code>/banword [слово]</code> — добавить запрещённое слово\n"
+        "<code>/unbanword [слово]</code> — удалить из списка",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:users")
+async def show_users_menu(callback: CallbackQuery, db: Database) -> None:
+    """Меню управления пользователями."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    builder = _users_menu_keyboard()
+    await callback.message.edit_text(
+        "👥 <b>Управление пользователями</b>\n\n"
+        f"Активный чат: <code>{selected}</code>\n\n"
+        "Выберите категорию:",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:words")
+async def show_words_menu(callback: CallbackQuery, db: Database) -> None:
+    """Меню управления словами."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    builder = _words_menu_keyboard()
+    await callback.message.edit_text(
+        "🚫 <b>Банлист слов</b>\n\n"
+        f"Активный чат: <code>{selected}</code>\n\n"
+        "Сообщения с запрещёнными словами будут удаляться.",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "users:confirmed:list")
+async def show_confirmed_list(callback: CallbackQuery, bot: Bot, db: Database) -> None:
+    """Список подтверждённых пользователей."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    if not await _validate_admin(bot, selected, callback.from_user.id):
+        await callback.answer("Нет прав администратора в этом чате!", show_alert=True)
+        return
+
+    confirmed = await db.get_confirmed_users(selected)
+    builder = _list_back_keyboard("menu:users")
+
+    if not confirmed:
+        text = (
+            "✅ <b>Подтверждённые пользователи</b>\n\n"
+            "Список пуст.\n\n"
+            "Добавить: <code>/confirm [user_id]</code>"
+        )
+    else:
+        lines = ["✅ <b>Подтверждённые пользователи</b>\n"]
+        for user_id in confirmed:
+            lines.append(f"• <code>{user_id}</code>")
+        lines.append(f"\nВсего: {len(confirmed)}")
+        lines.append("\nУдалить: <code>/unconfirm [user_id]</code>")
+        text = "\n".join(lines)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "users:banned:list")
+async def show_banned_list(callback: CallbackQuery, bot: Bot, db: Database) -> None:
+    """Список забаненных пользователей."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    if not await _validate_admin(bot, selected, callback.from_user.id):
+        await callback.answer("Нет прав администратора в этом чате!", show_alert=True)
+        return
+
+    banned = await db.get_banned_users(selected)
+    builder = _list_back_keyboard("menu:users")
+
+    if not banned:
+        text = (
+            "🚫 <b>Забаненные пользователи</b>\n\n"
+            "Список пуст.\n\n"
+            "Добавить: <code>/banuser [user_id]</code>"
+        )
+    else:
+        lines = ["🚫 <b>Забаненные пользователи</b>\n"]
+        for user_id in banned:
+            lines.append(f"• <code>{user_id}</code>")
+        lines.append(f"\nВсего: {len(banned)}")
+        lines.append("\nУдалить: <code>/unbanuser [user_id]</code>")
+        text = "\n".join(lines)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "words:list")
+async def show_words_list(callback: CallbackQuery, bot: Bot, db: Database) -> None:
+    """Список запрещённых слов."""
+    if not callback.from_user:
+        return
+
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+    if selected is None:
+        await callback.answer("Сначала выберите чат в настройках!", show_alert=True)
+        return
+
+    if not await _validate_admin(bot, selected, callback.from_user.id):
+        await callback.answer("Нет прав администратора в этом чате!", show_alert=True)
+        return
+
+    words = await db.get_banned_words(selected)
+    builder = _list_back_keyboard("menu:words")
+
+    if not words:
+        text = (
+            "📋 <b>Запрещённые слова</b>\n\n"
+            "Список пуст.\n\n"
+            "Добавить: <code>/banword [слово]</code>"
+        )
+    else:
+        lines = ["📋 <b>Запрещённые слова</b>\n"]
+        for word in words:
+            lines.append(f"• {word}")
+        lines.append(f"\nВсего: {len(words)}")
+        lines.append("\nУдалить: <code>/unbanword [слово]</code>")
+        text = "\n".join(lines)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
 @router.callback_query(F.data == "settings")
 async def show_settings(callback: CallbackQuery, bot: Bot, db: Database) -> None:
     if not callback.from_user:
         return
 
     chats = await _available_chats(bot, db, callback.from_user.id)
-    builder = _settings_keyboard(chats)
-    text = "Выберите группу, где вы админ и добавлен бот."
-    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    selected = await db.get_admin_selected_chat(callback.from_user.id)
+
+    if not chats:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔄 Обновить", callback_data="settings:refresh")
+        builder.button(text="◀️ Назад в меню", callback_data="menu:main")
+        builder.adjust(1)
+        await callback.message.edit_text(
+            "⚙️ <b>Настройки</b>\n\n"
+            "❌ <b>Нет доступных групп.</b>\n\n"
+            "Чтобы группа появилась:\n"
+            "1. Добавьте бота в группу\n"
+            "2. Дайте боту права администратора\n"
+            "3. Напишите любое сообщение в группе\n"
+            "4. Нажмите «Обновить»",
+            reply_markup=builder.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    builder = _settings_keyboard(chats, selected)
+    selected_text = f"\n\n✅ Выбран: <code>{selected}</code>" if selected else ""
+    await callback.message.edit_text(
+        f"⚙️ <b>Настройки</b>\n\n"
+        f"Выберите группу, где вы админ и добавлен бот:{selected_text}",
+        reply_markup=builder.as_markup(),
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data == "settings:refresh")
 async def refresh_settings(callback: CallbackQuery, bot: Bot, db: Database) -> None:
-    await show_settings(callback, bot, db)
+    try:
+        await show_settings(callback, bot, db)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await callback.answer("Список групп не изменился", show_alert=False)
+        else:
+            raise
 
 
 @router.callback_query(F.data.startswith("set_chat:"))
@@ -304,9 +573,14 @@ async def set_chat(callback: CallbackQuery, bot: Bot, db: Database) -> None:
         return
 
     await db.set_admin_selected_chat(callback.from_user.id, chat_id)
-    await callback.answer("Чат выбран для команд.")
-    builder = _settings_keyboard(chats)
+    chat_title = next((title for cid, title in chats if cid == chat_id), str(chat_id))
+    await callback.answer(f"✅ Выбран: {chat_title}")
+
+    builder = _settings_keyboard(chats, chat_id)
     await callback.message.edit_text(
-        f"Активный чат: <code>{chat_id}</code>.",
+        f"⚙️ <b>Настройки</b>\n\n"
+        f"Выберите группу, где вы админ и добавлен бот:\n\n"
+        f"✅ Выбран: <b>{chat_title}</b>\n"
+        f"<code>{chat_id}</code>",
         reply_markup=builder.as_markup(),
     )

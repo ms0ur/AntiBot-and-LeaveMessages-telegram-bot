@@ -45,19 +45,19 @@ async def start_command(message: Message) -> None:
         return
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="Настройки", callback_data="settings")
+    builder.button(text="⚙️ Настройки (выбор чата)", callback_data="settings")
+    builder.button(text="👥 Управление пользователями", callback_data="menu:users")
+    builder.button(text="🚫 Банлист слов", callback_data="menu:words")
+    builder.button(text="ℹ️ Помощь", callback_data="menu:help")
+    builder.adjust(1)
     await message.answer(
-        "Управление ботом ведется только в личке с администраторами.\n"
-        "Выберите чат в настройках, чтобы не вводить chat_id вручную.\n"
-        "Команды:\n"
-        "/confirm <chat_id?> <user_id> — добавить подтвержденного.\n"
-        "/unconfirm <chat_id?> <user_id> — убрать подтвержденного.\n"
-        "/banuser <chat_id?> <user_id> — добавить в банлист.\n"
-        "/unbanuser <chat_id?> <user_id> — убрать из банлиста.\n"
-        "/banword <chat_id?> <слово> — добавить слово в банлист.\n"
-        "/unbanword <chat_id?> <слово> — удалить слово из банлиста.\n"
-        "/confirmed <chat_id?> и /banwords <chat_id?> — показать списки.\n"
-        "chat_id можно пропустить, если чат выбран в настройках.",
+        "🤖 <b>Добро пожаловать!</b>\n\n"
+        "Этот бот помогает модерировать группы:\n"
+        "• Удаляет ботов, добавленных не-админами\n"
+        "• Удаляет сообщения о входе/выходе\n"
+        "• Фильтрует медиа от неподтверждённых пользователей\n"
+        "• Блокирует сообщения с запрещёнными словами\n\n"
+        "<b>Начните с настроек — выберите группу для управления.</b>",
         reply_markup=builder.as_markup(),
     )
 
