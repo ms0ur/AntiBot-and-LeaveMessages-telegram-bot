@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Iterable, List
 import aiosqlite
@@ -7,6 +8,7 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self._connection: aiosqlite.Connection | None = None
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self._connection = await aiosqlite.connect(self.path)
@@ -16,10 +18,9 @@ class Database:
         await self._connection.commit()
 
     async def setup(self) -> None:
-        if self._connection is None:
-            await self.connect()
+        connection = await self._ensure_connected()
 
-        await self._connection.executescript(
+        await connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS confirmed_users (
                 chat_id INTEGER NOT NULL,
@@ -51,7 +52,7 @@ class Database:
             );
             """
         )
-        await self._connection.commit()
+        await connection.commit()
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -148,22 +149,25 @@ class Database:
         return None
 
     async def _execute(self, query: str, params: Iterable) -> None:
-        if self._connection is None:
-            await self.connect()
-        assert self._connection is not None
-        await self._connection.execute(query, tuple(params))
-        await self._connection.commit()
+        connection = await self._ensure_connected()
+        await connection.execute(query, tuple(params))
+        await connection.commit()
 
     async def _fetchone(self, query: str, params: Iterable) -> tuple | None:
-        if self._connection is None:
-            await self.connect()
-        assert self._connection is not None
-        async with self._connection.execute(query, tuple(params)) as cursor:
+        connection = await self._ensure_connected()
+        async with connection.execute(query, tuple(params)) as cursor:
             return await cursor.fetchone()
 
     async def _fetchall(self, query: str, params: Iterable) -> List[tuple]:
-        if self._connection is None:
-            await self.connect()
-        assert self._connection is not None
-        async with self._connection.execute(query, tuple(params)) as cursor:
+        connection = await self._ensure_connected()
+        async with connection.execute(query, tuple(params)) as cursor:
             return await cursor.fetchall()
+
+    async def _ensure_connected(self) -> aiosqlite.Connection:
+        if self._connection is None:
+            async with self._connect_lock:
+                if self._connection is None:
+                    await self.connect()
+        if self._connection is None:
+            raise RuntimeError("Database connection not established")
+        return self._connection

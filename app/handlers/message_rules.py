@@ -1,13 +1,16 @@
+import logging
 from typing import Iterable
 from aiogram import Bot, Router
 from aiogram.enums import ChatType, ContentType
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.enums.chat_member_status import ChatMemberStatus
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.database import Database
+from app.utils import is_admin
 
 router = Router()
+logger = logging.getLogger(__name__)
 MEDIA_CONTENT_TYPES: set[ContentType] = {
     ContentType.ANIMATION,
     ContentType.AUDIO,
@@ -23,11 +26,6 @@ MEDIA_CONTENT_TYPES: set[ContentType] = {
 
 def extract_text(message: Message) -> str:
     return (message.text or message.caption or "").lower()
-
-
-async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    member = await bot.get_chat_member(chat_id, user_id)
-    return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
 
 
 async def is_confirmed_user(bot: Bot, db: Database, chat_id: int, user_id: int) -> bool:
@@ -101,5 +99,7 @@ async def enforce_rules(message: Message, bot: Bot, db: Database) -> None:
 async def _delete_quietly(message: Message) -> None:
     try:
         await message.delete()
-    except Exception:
-        pass
+    except TelegramBadRequest:
+        logger.debug("Message already removed or cannot be deleted: %s", message.message_id)
+    except TelegramAPIError as exc:
+        logger.warning("Failed to delete message %s: %s", message.message_id, exc)

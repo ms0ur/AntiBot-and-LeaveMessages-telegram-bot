@@ -1,17 +1,16 @@
+import logging
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
-from aiogram.enums.chat_member_status import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.database import Database
+from app.utils import is_admin
 
 router = Router()
 
-
-async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    member = await bot.get_chat_member(chat_id, user_id)
-    return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+logger = logging.getLogger(__name__)
 
 
 def _ensure_private(message: Message) -> bool:
@@ -40,7 +39,8 @@ async def _resolve_chat_id(message: Message, db: Database, args: list[str]) -> t
 async def _validate_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     try:
         return await is_admin(bot, chat_id, user_id)
-    except Exception:
+    except TelegramAPIError as exc:
+        logger.warning("Failed to validate admin in chat %s: %s", chat_id, exc)
         return False
 
 
@@ -51,7 +51,8 @@ async def _available_chats(bot: Bot, db: Database, user_id: int) -> list[tuple[i
         try:
             bot_member = await bot.get_chat_member(chat_id, bot.id)
             user_member = await bot.get_chat_member(chat_id, user_id)
-        except Exception:
+        except TelegramAPIError as exc:
+            logger.warning("Failed to check memberships for chat %s: %s", chat_id, exc)
             continue
 
         if bot_member.status not in {

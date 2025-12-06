@@ -1,24 +1,25 @@
 import asyncio
+import logging
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
-from aiogram.enums.chat_member_status import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import Message
 from app.database import Database
+from app.utils import is_admin
 
 router = Router()
 
-
-async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    member = await bot.get_chat_member(chat_id, user_id)
-    return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+logger = logging.getLogger(__name__)
 
 
 async def _delete_join_leave(message: Message) -> None:
     try:
         await asyncio.sleep(3)
         await message.delete()
-    except Exception:
-        pass
+    except TelegramBadRequest:
+        logger.debug("Join/leave message already removed or too old: %s", message.message_id)
+    except TelegramAPIError as exc:
+        logger.warning("Failed to delete join/leave message %s: %s", message.message_id, exc)
 
 
 @router.message(F.new_chat_members)
@@ -39,8 +40,10 @@ async def handle_new_members(message: Message, bot: Bot, db: Database) -> None:
             await bot.ban_chat_member(chat_id=message.chat.id, user_id=member.id)
             try:
                 await message.delete()
-            except Exception:
-                pass
+            except TelegramBadRequest:
+                logger.debug("Join message for banned bot already removed: %s", message.message_id)
+            except TelegramAPIError as exc:
+                logger.warning("Failed to delete join message for bot %s: %s", member.id, exc)
         elif not member.is_bot:
             await _delete_join_leave(message)
 
