@@ -3,6 +3,8 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      - DEBUG=${DEBUG:-false}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

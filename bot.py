@@ -10,8 +10,18 @@ from app.middlewares import DatabaseMiddleware
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
     config = load_config()
+
+    # Настраиваем логирование в зависимости от DEBUG
+    log_level = logging.DEBUG if config.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    if config.debug:
+        logging.getLogger("app").setLevel(logging.DEBUG)
+
     database = Database(config.database_path)
     await database.setup()
 
@@ -23,6 +33,8 @@ async def main() -> None:
 
     dp.message.middleware(DatabaseMiddleware(database))
     dp.callback_query.middleware(DatabaseMiddleware(database))
+    dp.chat_boost.middleware(DatabaseMiddleware(database))
+    dp.removed_chat_boost.middleware(DatabaseMiddleware(database))
 
     dp.include_router(admin.router)
     dp.include_router(membership.router)

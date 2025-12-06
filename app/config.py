@@ -11,6 +11,7 @@ class Config:
     bot_token: str
     database_path: Path
     default_parse_mode: ParseMode
+    debug: bool
 
 
 def load_config() -> Config:
@@ -32,8 +33,11 @@ def load_config() -> Config:
             + ", ".join(mode.name for mode in ParseMode)
         ) from exc
 
+    debug = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+
     return Config(
         bot_token=token,
         database_path=database_path,
         default_parse_mode=default_parse_mode,
+        debug=debug,
     )
